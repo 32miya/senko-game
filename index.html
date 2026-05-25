@@ -262,6 +262,29 @@ body {
   .s-val        { font-size:22px; }
   .comment-box  { font-size:12px; }
 }
+#scOnline, #scOnlineLobby {
+  justify-content:center;
+  background:radial-gradient(ellipse at 50% 30%,#0a1a2e 0%,#04020a 65%);
+  gap:14px;
+  padding: calc(36px + env(safe-area-inset-top,0px)) 24px calc(36px + env(safe-area-inset-bottom,0px));
+}
+.online-code-display {
+  font-size:32px; letter-spacing:14px; color:var(--gold2);
+  border:1px solid rgba(212,168,83,0.4); border-radius:12px;
+  padding:12px 24px; font-weight:300;
+}
+.online-input {
+  background:rgba(255,255,255,0.06); border:1px solid rgba(212,168,83,0.28);
+  border-radius:8px; padding:10px 16px; color:#e8dcc8; font-size:14px;
+  font-family:inherit; letter-spacing:3px; text-align:center; outline:none;
+  width:100%; max-width:280px;
+}
+.online-player-list { display:flex; flex-direction:column; gap:8px; width:100%; max-width:280px; }
+.btn-online { background:rgba(212,168,83,0.12); border:1px solid rgba(212,168,83,0.5);
+  border-radius:8px; padding:10px 20px; color:#e8dcc8; font-size:12px;
+  letter-spacing:4px; font-family:inherit; cursor:pointer; }
+.btn-online:active { background:rgba(212,168,83,0.28); }
+.online-or { font-size:10px; letter-spacing:4px; color:var(--dim); }
 </style>
 </head>
 <body>
@@ -272,10 +295,34 @@ body {
   <div class="title-main">線香花火品評会</div>
   <div class="title-sub">SENKO HANABI COMPETITION</div>
   <button class="btn-start" onclick="goLobby()">点 火</button>
+  <button class="btn-online" onclick="goOnline()" style="margin-top:-4px">オ ン ラ イ ン 対 戦</button>
   <div class="best-score-wrap" id="bestScoreWrap" style="display:none">
     <div class="best-score-label">自 己 ベ ス ト</div>
     <div class="best-score-val" id="bestScoreVal">—</div>
   </div>
+</div>
+
+<!-- ONLINE: name + create/join -->
+<div class="screen" id="scOnline">
+  <div class="title-spark" style="font-size:36px;margin-bottom:4px">🎇</div>
+  <div class="lobby-title" style="font-size:12px;letter-spacing:8px">オ ン ラ イ ン 対 戦</div>
+  <input class="online-input" id="onlineNameInput" placeholder="あなたの名前" maxlength="8">
+  <button class="btn-start" onclick="createOnlineRoom()">ル ー ム を 作 る</button>
+  <div class="online-or">― ま た は ―</div>
+  <input class="online-input" id="onlineJoinCode" placeholder="ルームコード (例: AB3X)" maxlength="4" style="letter-spacing:8px;text-transform:uppercase">
+  <button class="btn-online" onclick="joinOnlineRoom()">参 加 す る</button>
+  <button class="btn-online" onclick="showScreen('scTitle')" style="margin-top:4px;opacity:0.5">← 戻 る</button>
+</div>
+
+<!-- ONLINE LOBBY: waiting room -->
+<div class="screen" id="scOnlineLobby">
+  <div class="lobby-title" style="font-size:12px;letter-spacing:7px">待 機 中</div>
+  <div class="lobby-sub">ルームコード</div>
+  <div class="online-code-display" id="onlineRoomCodeDisplay">----</div>
+  <div class="lobby-sub" style="margin-top:4px">このコードを仲間に伝えてください</div>
+  <div class="online-player-list" id="onlinePlayerList"></div>
+  <button class="btn-start" id="btnOnlineStart" onclick="startOnlineGame()">全 員 で 点 火</button>
+  <button class="btn-online" onclick="leaveOnlineRoom()" style="opacity:0.5">退 出</button>
 </div>
 
 <!-- LOBBY: player count -->
@@ -387,6 +434,8 @@ body {
   <button class="btn-title-link" onclick="resetGame()">タイトルへ戻る</button>
 </div>
 
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
 <script>
 (function () {
   "use strict";
@@ -1017,6 +1066,10 @@ body {
       ? "0 0 10px rgba(255,180,40," + (_tapBlockedFlash * 0.8).toFixed(2) + ")" : "";
     document.getElementById("timerLabel").textContent = elapsed.toFixed(1) + "s";
     document.getElementById("phaseLabel").textContent = PHASE_NAMES[phaseIdx];
+
+    // オンライン同期（約5フレームに1回）
+    if (_onlineMode && frameN % 5 === 0) _onlineSyncState(elapsed);
+    _renderOnlineOthers(gc.width, gc.height);
 
     animId = requestAnimationFrame(gameLoop);
   }
@@ -1902,7 +1955,7 @@ body {
           trail:[], trailMax:3, canBranch:false, branched:false
         });
       }
-      if (mpActive) { recordPlayerResult(elapsed); } else { endGame(elapsed); }
+      if (_onlineMode) { _onlineGameEnd(elapsed); } else if (mpActive) { recordPlayerResult(elapsed); } else { endGame(elapsed); }
       return;
     }
     animId = requestAnimationFrame(fallLoop);
@@ -3345,6 +3398,254 @@ body {
       osc.start(t); osc.stop(t + 0.70);
       _noise(0.14, 0.09, 900);
     } catch(e) {}
+  }
+
+  // ── ONLINE MODE ────────────────────────────────
+  var _onlineMode    = false;
+  var _onlinePid     = null;
+  var _onlineCode    = null;
+  var _onlineIsHost  = false;
+  var _onlineMyName  = '';
+  var _onlineRef     = null;
+  var _onlinePlayers = {};
+  var _fbApp         = null;
+  var _onlineDb      = null;
+
+  function _initFirebase() {
+    if (_fbApp) return;
+    _fbApp = firebase.initializeApp({
+      apiKey: "AIzaSyBYJ5--YuB4KZQqr7OGpMFrMiEsbWMwD3M",
+      authDomain: "senko-game.firebaseapp.com",
+      databaseURL: "https://senko-game-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "senko-game",
+      storageBucket: "senko-game.firebasestorage.app",
+      messagingSenderId: "510070221353",
+      appId: "1:510070221353:web:41e823fadab2007697ca38"
+    });
+    _onlineDb = firebase.database();
+  }
+
+  function _genCode() {
+    var c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    var s = '';
+    for (var i = 0; i < 4; i++) s += c[Math.floor(Math.random() * c.length)];
+    return s;
+  }
+
+  window.goOnline = function() {
+    _initFirebase();
+    showScreen('scOnline');
+  };
+
+  window.createOnlineRoom = function() {
+    var name = document.getElementById('onlineNameInput').value.trim() || 'あなた';
+    _onlineMyName = name.slice(0, 8);
+    _onlinePid    = Math.random().toString(36).slice(2, 10);
+    _onlineCode   = _genCode();
+    _onlineIsHost = true;
+    _onlineRef    = _onlineDb.ref('rooms/' + _onlineCode);
+    _onlineRef.set({ status: 'waiting', createdAt: Date.now() });
+    _onlineRef.child('players/' + _onlinePid).set({
+      name: _onlineMyName, isHost: true,
+      alive: false, phase: 0, stability: 100,
+      burnTime: 0, score: 0, done: false
+    });
+    _openOnlineLobby();
+  };
+
+  window.joinOnlineRoom = function() {
+    var name = document.getElementById('onlineNameInput').value.trim() || 'ゲスト';
+    var code = document.getElementById('onlineJoinCode').value.trim().toUpperCase();
+    if (code.length < 2) { alert('ルームコードを入力してください'); return; }
+    _onlineMyName = name.slice(0, 8);
+    _onlinePid    = Math.random().toString(36).slice(2, 10);
+    _onlineCode   = code;
+    _onlineIsHost = false;
+    _onlineRef    = _onlineDb.ref('rooms/' + _onlineCode);
+    _onlineRef.child('status').once('value', function(snap) {
+      var st = snap.val();
+      if (!st)             { alert('ルームが見つかりません: ' + code); return; }
+      if (st === 'playing'){ alert('ゲームはすでに始まっています'); return; }
+      _onlineRef.child('players/' + _onlinePid).set({
+        name: _onlineMyName, isHost: false,
+        alive: false, phase: 0, stability: 100,
+        burnTime: 0, score: 0, done: false
+      });
+      _openOnlineLobby();
+    });
+  };
+
+  function _openOnlineLobby() {
+    document.getElementById('onlineRoomCodeDisplay').textContent = _onlineCode;
+    document.getElementById('btnOnlineStart').style.display = _onlineIsHost ? '' : 'none';
+    showScreen('scOnlineLobby');
+    _onlineRef.child('players').on('value', function(snap) {
+      _onlinePlayers = snap.val() || {};
+      var list = document.getElementById('onlinePlayerList');
+      list.innerHTML = '';
+      Object.keys(_onlinePlayers).forEach(function(pid) {
+        var p = _onlinePlayers[pid];
+        var d = document.createElement('div');
+        d.style.cssText = 'padding:8px 16px;border:1px solid rgba(212,168,83,0.3);border-radius:8px;letter-spacing:2px;font-size:13px;text-align:center;';
+        d.textContent = (p.isHost ? '👑 ' : '🎇 ') + p.name;
+        list.appendChild(d);
+      });
+    });
+    _onlineRef.child('status').on('value', function(snap) {
+      var st = snap.val();
+      if (st === 'playing') _beginOnlineGame();
+      if (st === 'done')    _showOnlineRanking();
+    });
+  }
+
+  window.startOnlineGame = function() {
+    if (!_onlineIsHost) return;
+    _onlineRef.child('status').set('playing');
+  };
+
+  window.leaveOnlineRoom = function() {
+    if (_onlineRef) {
+      _onlineRef.child('players/' + _onlinePid).remove();
+      _onlineRef.off();
+      _onlineRef = null;
+    }
+    _onlineMode = false;
+    showScreen('scTitle');
+  };
+
+  function _beginOnlineGame() {
+    if (_onlineMode) return;
+    _onlineMode = true;
+    _onlineRef.off();
+    _onlineRef.child('players').on('value', function(snap) {
+      _onlinePlayers = snap.val() || {};
+    });
+    _onlineRef.child('status').on('value', function(snap) {
+      if (snap.val() === 'done') _showOnlineRanking();
+    });
+    // オンライン人数を数え、足りない分をCPUで補う
+    var onlineCount = Object.keys(_onlinePlayers).length;
+    var totalSlots  = 8; // 常に8枠、足りない分はCPUが埋める
+    mpActive        = true;
+    mpTotalPlayers  = totalSlots; // startGame が (totalSlots-1) 体のCPUを生成する
+    mpCurrentRound  = 0;
+    mpRoundResults  = [];
+    mpPlayerNames   = [_onlineMyName];
+    cpuUnits        = [];
+    startGame();
+  }
+
+  function _onlineSyncState(elapsed) {
+    if (!_onlineRef) return;
+    _onlineRef.child('players/' + _onlinePid).update({
+      alive: true, phase: phaseIdx,
+      stability: Math.round(stability),
+      burnTime: parseFloat(elapsed.toFixed(1))
+    });
+  }
+
+  function _onlineGameEnd(elapsed) {
+    stopAudio();
+    var score = _calcScore(elapsed, phaseIdx, maxStab, comboMax);
+    _onlineRef.child('players/' + _onlinePid).update({
+      alive: false, done: true,
+      burnTime: parseFloat(elapsed.toFixed(1)),
+      score: score, phase: phaseIdx
+    });
+    gameState = 'watching';
+    var hint = document.getElementById('tapHint');
+    hint.textContent = '他のプレイヤーを待っています…';
+    hint.style.opacity = '1';
+    // ホストが全員完了を検知して status=done にする
+    _onlineRef.child('players').once('value', function(snap) {
+      var all = snap.val() || {};
+      var allDone = Object.keys(all).every(function(pid) { return all[pid].done; });
+      if (allDone && _onlineIsHost) _onlineRef.child('status').set('done');
+    });
+    // 自分がホストでない場合: 定期チェック
+    if (!_onlineIsHost) {
+      var _waitInterval = setInterval(function() {
+        _onlineRef.child('players').once('value', function(snap) {
+          var all = snap.val() || {};
+          var allDone = Object.keys(all).every(function(pid) { return all[pid].done; });
+          if (allDone) {
+            clearInterval(_waitInterval);
+            _onlineRef.child('status').set('done');
+          }
+        });
+      }, 1000);
+    }
+    requestAnimationFrame(function loop(ts) {
+      if (gameState !== 'watching') return;
+      var elapsed2 = (ts - startTime) / 1000;
+      var W = gc.width, H = gc.height;
+      gctx.clearRect(0, 0, W, H);
+      renderBG(elapsed2);
+      renderBgFWs();
+      updateBgFWs((ts - lastTS) / 1000);
+      lastTS = ts;
+      renderStickOnly(humanDrawX());
+      _renderOnlineOthers(W, H);
+      animId = requestAnimationFrame(loop);
+    });
+  }
+
+  function _showOnlineRanking() {
+    if (!_onlineRef) return;
+    _onlineRef.child('players').once('value', function(snap) {
+      var all = snap.val() || {};
+      mpRoundResults = [];
+      Object.keys(all).forEach(function(pid) {
+        var p = all[pid];
+        var gr = _getGradeObj(p.score || 0);
+        mpRoundResults.push({
+          name: p.name, burnTime: p.burnTime || 0,
+          phase: p.phase || 0, score: p.score || 0,
+          grade: gr.name, color: pid === _onlinePid ? '#f0c870' : '#88b8ff'
+        });
+      });
+      cancelAnimationFrame(animId);
+      _onlineMode = false;
+      _onlineRef.off();
+      showRanking();
+    });
+  }
+
+  function _renderOnlineOthers(W, H) {
+    if (!_onlineMode) return;
+    var others = Object.keys(_onlinePlayers).filter(function(pid) { return pid !== _onlinePid; });
+    if (others.length === 0) return;
+    var barW = Math.min(72, (W * 0.88) / others.length - 8);
+    var totalW = others.length * (barW + 8) - 8;
+    var sx = (W - totalW) / 2;
+    gctx.save();
+    others.forEach(function(pid, i) {
+      var p = _onlinePlayers[pid];
+      if (!p) return;
+      var x = sx + i * (barW + 8), y = H * 0.03;
+      gctx.globalAlpha = 0.72;
+      gctx.fillStyle = 'rgba(4,2,10,0.7)';
+      gctx.beginPath();
+      if (gctx.roundRect) gctx.roundRect(x, y, barW, 38, 6);
+      else gctx.rect(x, y, barW, 38);
+      gctx.fill();
+      gctx.globalAlpha = 1;
+      gctx.textAlign = 'center';
+      gctx.fillStyle = p.alive ? '#e8dcc8' : 'rgba(232,220,200,0.3)';
+      gctx.font = '300 10px "Noto Serif JP",serif';
+      gctx.fillText(p.name.slice(0, 6), x + barW / 2, y + 13);
+      var stab = Math.max(0, Math.min(100, p.stability || 0)) / 100;
+      gctx.fillStyle = 'rgba(255,255,255,0.08)';
+      gctx.fillRect(x + 4, y + 18, barW - 8, 5);
+      gctx.fillStyle = p.alive ? '#d4a853' : '#333';
+      gctx.fillRect(x + 4, y + 18, (barW - 8) * stab, 5);
+      var ph = ['蕾','牡丹','松葉','散り'][Math.min(3, p.phase || 0)];
+      gctx.fillStyle = p.alive ? 'rgba(212,168,83,0.55)' : 'rgba(90,74,56,0.5)';
+      gctx.font = '300 9px "Noto Serif JP",serif';
+      gctx.fillText(ph, x + barW / 2, y + 33);
+    });
+    gctx.restore();
+    gctx.textAlign = 'left';
   }
 
   // ── RESET ──────────────────────────────────────
