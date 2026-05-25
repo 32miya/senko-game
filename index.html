@@ -474,6 +474,7 @@ body {
   var livePlayerNames  = [];   // names entered in live setup
   var _onLiveClick     = null; // click handler ref for live mode cleanup
   var _resonanceFlash  = null; // { t, cx1,cy1, cx2,cy2 } — 共鳴エフェクト
+  var _liveAliveCount  = 0;    // 現在の生存者数（列幅計算用）
 
   // フェーズ延長
   var phaseEnds    = [8, 16, 24, 32];
@@ -2645,8 +2646,23 @@ body {
       lastPerfTime: -9999, _surgeFlash: 0,
       alive: true, burnTime: 0, eliminatedPhase: 0,
       hue: LIVE_HUES[colIdx % LIVE_HUES.length],
-      drawX: 0, _wx: 0, _wy: 0
+      drawX: 0, drawXTgt: 0, _wx: 0, _wy: 0
     };
+  }
+
+  // 生存者を画面に均等配置し直す
+  function recalcLivePositions() {
+    if (!gc) return;
+    var alive = [];
+    for (var _rli = 0; _rli < liveUnits.length; _rli++) {
+      if (liveUnits[_rli].alive) alive.push(liveUnits[_rli]);
+    }
+    _liveAliveCount = alive.length;
+    if (_liveAliveCount === 0) return;
+    var cw = gc.width / _liveAliveCount;
+    for (var _ri2 = 0; _ri2 < alive.length; _ri2++) {
+      alive[_ri2].drawXTgt = (_ri2 + 0.5) * cw;
+    }
   }
 
   function startLiveGame() {
@@ -2662,9 +2678,11 @@ body {
     var colW = gc.width / mpTotalPlayers;
     for (var _li = 0; _li < mpTotalPlayers; _li++) {
       var u = createLiveUnit(livePlayerNames[_li] || ('P' + (_li + 1)), _li);
-      u.drawX = ((_li + 0.5) * colW);
+      u.drawX    = (_li + 0.5) * colW;
+      u.drawXTgt = (_li + 0.5) * colW;
       liveUnits.push(u);
     }
+    _liveAliveCount = liveUnits.length;
 
     // Shared state reset
     particles = []; smokes = []; bgFWs = [];
@@ -2824,6 +2842,7 @@ body {
         u.burnTime = elapsed; u.eliminatedPhase = u.phaseIdx;
         launchBgFW(u.drawX, u.hue, 1.4);
         launchBgFW(u.drawX + (Math.random()-0.5)*40, u.hue + 25, 1.0);
+        recalcLivePositions();  // 生存者の列を詰め直す
         // A. 落下の余波: 隣の列に突風と安定度ダメージ
         var _eGust = 8 + Math.floor(Math.random() * 8);
         for (var _aj = 0; _aj < liveUnits.length; _aj++) {
@@ -2879,6 +2898,15 @@ body {
 
     if (_resonanceFlash && _resonanceFlash.t > 0) _resonanceFlash.t -= dt;
 
+    // 生存者のX位置を目標へスムーズに寄せる（列詰めアニメーション）
+    var _lerpRate = Math.min(1, 2.8 * dt);
+    for (var _ll = 0; _ll < liveUnits.length; _ll++) {
+      var _lu = liveUnits[_ll];
+      if (_lu.drawXTgt !== undefined) {
+        _lu.drawX += (_lu.drawXTgt - _lu.drawX) * _lerpRate;
+      }
+    }
+
     _bgFwTimer -= dt;
     if (_bgFwTimer <= 0) {
       launchBgFW(Math.random()*gc.width, 20+Math.random()*60, 0.6+timePressure*0.3);
@@ -2906,11 +2934,15 @@ body {
       renderLiveUnit(liveUnits[_ri], elapsed, H, sharedPhase);
     }
 
-    // Column dividers
-    var cW = W / liveUnits.length;
+    // Column dividers — 生存者の現在drawX中間に描く
+    var _aliveUs = [];
+    for (var _dci2 = 0; _dci2 < liveUnits.length; _dci2++) {
+      if (liveUnits[_dci2].alive) _aliveUs.push(liveUnits[_dci2]);
+    }
     gctx.globalAlpha = 0.07; gctx.strokeStyle = '#d4a853'; gctx.lineWidth = 0.5;
-    for (var _ci = 1; _ci < liveUnits.length; _ci++) {
-      gctx.beginPath(); gctx.moveTo(cW*_ci, H*0.03); gctx.lineTo(cW*_ci, H*0.87); gctx.stroke();
+    for (var _dci = 1; _dci < _aliveUs.length; _dci++) {
+      var divX = (_aliveUs[_dci-1].drawX + _aliveUs[_dci].drawX) / 2;
+      gctx.beginPath(); gctx.moveTo(divX, H*0.03); gctx.lineTo(divX, H*0.87); gctx.stroke();
     }
     gctx.globalAlpha = 1;
 
@@ -3086,12 +3118,11 @@ body {
     var nearGood = r <= RING_GOOD, inPerf = r <= RING_PERF;
     var prox = 1 - (r - RING_MIN) / (RING_MAX - RING_MIN);
 
-    // Clip to column so rings never visually overflow into neighbours
-    var colW3 = gc.width / liveUnits.length;
-    var clipX = u.colIdx * colW3;
+    // Clip around current drawX so rings never overflow into neighbour columns
+    var _halfColW = gc.width / Math.max(1, _liveAliveCount) / 2;
     gctx.save();
     gctx.beginPath();
-    gctx.rect(clipX + 2, 0, colW3 - 4, gc.height);
+    gctx.rect(wx - _halfColW + 2, 0, _halfColW * 2 - 4, gc.height);
     gctx.clip();
 
     // Sweet-spot donut
