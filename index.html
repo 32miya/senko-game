@@ -1069,7 +1069,8 @@ body {
 
     // オンライン同期（約5フレームに1回）
     if (_onlineMode && frameN % 5 === 0) _onlineSyncState(elapsed);
-    _renderOnlineOthers(gc.width, gc.height);
+    // FirebaseデータをCPUスロットのオンラインユニットに反映
+    if (_onlineMode) _applyOnlineSyncToUnits();
 
     animId = requestAnimationFrame(gameLoop);
   }
@@ -3410,6 +3411,7 @@ body {
   var _onlinePlayers = {};
   var _fbApp         = null;
   var _onlineDb      = null;
+  var ONLINE_HUES    = [280, 120, 350, 28, 168, 315, 200];
 
   function _initFirebase() {
     if (_fbApp) return;
@@ -3513,26 +3515,78 @@ body {
     showScreen('scTitle');
   };
 
+  // オンラインプレイヤー用のCPU互換ユニットを生成
+  function _createOnlineUnit(pid, name, hue) {
+    return {
+      name: name, isOnline: true, onlinePid: pid,
+      hue: hue, stability: STABILITY_MAX, maxStab: STABILITY_MAX,
+      phaseEnds: [8, 16, 24, 32], phase: 0, elapsed: 0,
+      emberWobble: Math.random() * Math.PI * 2,
+      nextTap: 1.0, lastTapTime: -999,
+      burnYOffset: (Math.random() - 0.5) * 44,
+      eliminated: false, eliminatedAt: null, eliminatedPhase: 0, burnTime: 0,
+      personality: '堅実', level: 1
+    };
+  }
+
+  // FirebaseデータをCPUスロットのオンラインユニットに毎フレーム反映
+  function _applyOnlineSyncToUnits() {
+    for (var _oi = 0; _oi < cpuUnits.length; _oi++) {
+      var _ou = cpuUnits[_oi];
+      if (!_ou.isOnline) continue;
+      var _op = _onlinePlayers[_ou.onlinePid];
+      if (!_op) continue;
+      var _wasElim = _ou.eliminated;
+      _ou.stability = (_op.stability != null) ? _op.stability : _ou.stability;
+      _ou.phase     = _op.phase  || 0;
+      _ou.elapsed   = _op.burnTime || 0;
+      _ou.burnTime  = _op.burnTime || 0;
+      _ou.eliminated = !_op.alive || !!_op.done;
+      if (!_wasElim && _ou.eliminated) _ou.eliminatedPhase = _ou.phase;
+    }
+  }
+
   function _beginOnlineGame() {
     if (_onlineMode) return;
     _onlineMode = true;
     _onlineRef.off();
+
+    // 他のオンラインプレイヤーを特定
+    var otherPids = Object.keys(_onlinePlayers).filter(function(pid) { return pid !== _onlinePid; });
+    var cpuSlots  = 7 - otherPids.length; // 8枠 - 自分1 - オンライン他者
+
+    mpActive = true; mpTotalPlayers = 8;
+    mpCurrentRound = 0; mpRoundResults = [];
+    mpPlayerNames = [_onlineMyName];
+    cpuUnits = [];
+
+    // CPUで残りスロットを埋める（startGameに任せず手動生成）
+    for (var _ci = 0; _ci < cpuSlots; _ci++) {
+      cpuUnits.push(createCpuUnit(
+        CPU_NAMES[_ci % CPU_NAMES.length],
+        Math.min(2, Math.floor(_ci / 2)),
+        CPU_HUES[_ci % CPU_HUES.length],
+        CPU_PERSONALITIES[_ci % CPU_PERSONALITIES.length]
+      ));
+    }
+    // オンラインプレイヤーをCPUスロットとして追加
+    otherPids.forEach(function(pid, _oi) {
+      var _op = _onlinePlayers[pid];
+      cpuUnits.push(_createOnlineUnit(pid, _op.name, ONLINE_HUES[_oi % ONLINE_HUES.length]));
+    });
+
     _onlineRef.child('players').on('value', function(snap) {
       _onlinePlayers = snap.val() || {};
     });
     _onlineRef.child('status').on('value', function(snap) {
       if (snap.val() === 'done') _showOnlineRanking();
     });
-    // オンライン人数を数え、足りない分をCPUで補う
-    var onlineCount = Object.keys(_onlinePlayers).length;
-    var totalSlots  = 8; // 常に8枠、足りない分はCPUが埋める
-    mpActive        = true;
-    mpTotalPlayers  = totalSlots; // startGame が (totalSlots-1) 体のCPUを生成する
-    mpCurrentRound  = 0;
-    mpRoundResults  = [];
-    mpPlayerNames   = [_onlineMyName];
-    cpuUnits        = [];
+
+    // startGameのCPU自動生成をスキップするため mpTotalPlayers を一時的に1にする
+    var _savedTotal = mpTotalPlayers;
+    mpTotalPlayers = 1;
     startGame();
+    mpTotalPlayers = _savedTotal;
   }
 
   function _onlineSyncState(elapsed) {
@@ -3611,42 +3665,6 @@ body {
     });
   }
 
-  function _renderOnlineOthers(W, H) {
-    if (!_onlineMode) return;
-    var others = Object.keys(_onlinePlayers).filter(function(pid) { return pid !== _onlinePid; });
-    if (others.length === 0) return;
-    var barW = Math.min(72, (W * 0.88) / others.length - 8);
-    var totalW = others.length * (barW + 8) - 8;
-    var sx = (W - totalW) / 2;
-    gctx.save();
-    others.forEach(function(pid, i) {
-      var p = _onlinePlayers[pid];
-      if (!p) return;
-      var x = sx + i * (barW + 8), y = H * 0.03;
-      gctx.globalAlpha = 0.72;
-      gctx.fillStyle = 'rgba(4,2,10,0.7)';
-      gctx.beginPath();
-      if (gctx.roundRect) gctx.roundRect(x, y, barW, 38, 6);
-      else gctx.rect(x, y, barW, 38);
-      gctx.fill();
-      gctx.globalAlpha = 1;
-      gctx.textAlign = 'center';
-      gctx.fillStyle = p.alive ? '#e8dcc8' : 'rgba(232,220,200,0.3)';
-      gctx.font = '300 10px "Noto Serif JP",serif';
-      gctx.fillText(p.name.slice(0, 6), x + barW / 2, y + 13);
-      var stab = Math.max(0, Math.min(100, p.stability || 0)) / 100;
-      gctx.fillStyle = 'rgba(255,255,255,0.08)';
-      gctx.fillRect(x + 4, y + 18, barW - 8, 5);
-      gctx.fillStyle = p.alive ? '#d4a853' : '#333';
-      gctx.fillRect(x + 4, y + 18, (barW - 8) * stab, 5);
-      var ph = ['蕾','牡丹','松葉','散り'][Math.min(3, p.phase || 0)];
-      gctx.fillStyle = p.alive ? 'rgba(212,168,83,0.55)' : 'rgba(90,74,56,0.5)';
-      gctx.font = '300 9px "Noto Serif JP",serif';
-      gctx.fillText(ph, x + barW / 2, y + 33);
-    });
-    gctx.restore();
-    gctx.textAlign = 'left';
-  }
 
   // ── RESET ──────────────────────────────────────
   window.resetGame = function() {
