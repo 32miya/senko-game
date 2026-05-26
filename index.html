@@ -3551,28 +3551,22 @@ body {
     _onlineMode = true;
     _onlineRef.off();
 
-    // 他のオンラインプレイヤーを特定
-    var otherPids = Object.keys(_onlinePlayers).filter(function(pid) { return pid !== _onlinePid; });
-    var cpuSlots  = 7 - otherPids.length; // 8枠 - 自分1 - オンライン他者
-
     mpActive = true; mpTotalPlayers = 8;
     mpCurrentRound = 0; mpRoundResults = [];
     mpPlayerNames = [_onlineMyName];
     cpuUnits = [];
 
-    // CPUで残りスロットを埋める（startGameに任せず手動生成）
-    for (var _ci = 0; _ci < cpuSlots; _ci++) {
-      cpuUnits.push(createCpuUnit(
-        CPU_NAMES[_ci % CPU_NAMES.length],
-        Math.min(2, Math.floor(_ci / 2)),
-        CPU_HUES[_ci % CPU_HUES.length],
-        CPU_PERSONALITIES[_ci % CPU_PERSONALITIES.length]
-      ));
-    }
-    // オンラインプレイヤーをCPUスロットとして追加
+    // startGame に8人レイアウトを作らせる（7体のCPUが自動生成される）
+    startGame();
+
+    // 末尾のCPUスロットをオンラインプレイヤーで上書き
+    var otherPids = Object.keys(_onlinePlayers).filter(function(pid) { return pid !== _onlinePid; });
     otherPids.forEach(function(pid, _oi) {
       var _op = _onlinePlayers[pid];
-      cpuUnits.push(_createOnlineUnit(pid, _op.name, ONLINE_HUES[_oi % ONLINE_HUES.length]));
+      var slotIdx = cpuUnits.length - 1 - _oi;
+      if (slotIdx >= 0) {
+        cpuUnits[slotIdx] = _createOnlineUnit(pid, _op.name, ONLINE_HUES[_oi % ONLINE_HUES.length]);
+      }
     });
 
     _onlineRef.child('players').on('value', function(snap) {
@@ -3581,12 +3575,6 @@ body {
     _onlineRef.child('status').on('value', function(snap) {
       if (snap.val() === 'done') _showOnlineRanking();
     });
-
-    // startGameのCPU自動生成をスキップするため mpTotalPlayers を一時的に1にする
-    var _savedTotal = mpTotalPlayers;
-    mpTotalPlayers = 1;
-    startGame();
-    mpTotalPlayers = _savedTotal;
   }
 
   function _onlineSyncState(elapsed) {
