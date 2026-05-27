@@ -577,12 +577,11 @@ body {
   var _onTouch    = null;
   var _onTouchEnd = null;
   var _touchStartX = 0, _touchStartY = 0, _touchStartT = 0;
-  var _tapMode = 'normal'; // 'normal' | 'attack' | 'cooperate'
-  var _TAP_MODES = ['normal','attack','cooperate'];
-  var _MODE_CFG  = {
-    normal:    { icon:'🎇', label:'通　常', color:'#d4a853' },
+  var _tapMode = 'unguarded'; // 'unguarded' | 'attack' | 'defense'
+  var _MODE_CFG = {
+    unguarded: { icon:'🎇', label:'無防備', color:'#d4a853' },
     attack:    { icon:'⚔️',  label:'攻　撃', color:'#ff4455' },
-    cooperate: { icon:'🤝', label:'協　力', color:'#44aaff' }
+    defense:   { icon:'🛡️', label:'防　御', color:'#44aaff' }
   };
 
   // CPU opponent system
@@ -822,8 +821,8 @@ body {
       var dx   = e.changedTouches[0].clientX - _touchStartX;
       var dy   = e.changedTouches[0].clientY - _touchStartY;
       var dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist > 45 && Math.abs(dx) > Math.abs(dy)) {
-        _cycleTapMode(dx > 0 ? 1 : -1);
+      if (dist > 45 && Math.abs(dy) > Math.abs(dx)) {
+        _verticalSwipe(dy < 0 ? 'up' : 'down');
       } else if (dist < 22 && Date.now() - _touchStartT < 400) {
         onTap();
       }
@@ -880,7 +879,7 @@ body {
     initBG();
     initAudio();
 
-    _tapMode = 'normal';
+    _tapMode = 'unguarded';
     _updateModeUI();
 
     var hint = document.getElementById("tapHint");
@@ -973,7 +972,8 @@ body {
     var gustProb  = 0.025 + Math.max(0, elapsed - 25) * 0.0030;
     var gustAmt   = 10 + Math.round(Math.max(0, elapsed - 25) * 0.35);
     var gust      = (Math.random() < gustProb) ? gustAmt : 0;
-    stability    -= (DRAIN_BASE * drainMult * timePressure * _lastManMult + gust) * dt;
+    var modeMult = (_tapMode === 'attack') ? 1.25 : (_tapMode === 'defense') ? 0.90 : 1.0;
+    stability    -= (DRAIN_BASE * drainMult * timePressure * _lastManMult * modeMult + gust) * dt;
     if (stability < 0) stability = 0;
 
     _burnY = getBurnY(elapsed, _burnYOffset);
@@ -1131,7 +1131,7 @@ body {
     lastTap = now;
     tapCount++;
     // オンラインモードで攻撃/協力タップ → Firebase にイベント送信
-    if (_onlineMode && _tapMode !== 'normal') _sendOnlineTapEffect();
+    if (_onlineMode && _tapMode === 'attack') _sendOnlineTapEffect();
     var prevCombo = combo;
 
     if (phaseIdx === 1 && peonyChance !== null &&
@@ -1712,6 +1712,7 @@ body {
     gctx.beginPath(); gctx.moveTo(wx, charY); gctx.lineTo(wx, wy - 7); gctx.stroke();
     gctx.lineCap = 'butt';
     renderHand(topX, topY);
+    if (_onlineMyName) _renderVerticalName(_onlineMyName, topX, topY + 20, charY - 6);
   }
 
   function renderHand(x, y) {
@@ -1724,6 +1725,23 @@ body {
       gctx.ellipse(x + f*5.5, y + 5, 4, 9, f*0.06, 0, Math.PI*2);
       gctx.fill();
     }
+  }
+
+  function _renderVerticalName(name, cx, topY, bottomY) {
+    if (!name) return;
+    var len = name.length;
+    var fs  = Math.max(8, Math.min(12, (bottomY - topY) / (len + 1)));
+    var mid = (topY + bottomY) * 0.5;
+    var startY = mid - (len * fs) * 0.5 + fs * 0.5;
+    gctx.save();
+    gctx.font = 'bold ' + fs + 'px sans-serif';
+    gctx.fillStyle = 'rgba(255,235,180,0.70)';
+    gctx.textAlign = 'center';
+    gctx.textBaseline = 'middle';
+    for (var _vi = 0; _vi < len; _vi++) {
+      gctx.fillText(name[_vi], cx, startY + _vi * fs);
+    }
+    gctx.restore();
   }
 
   function renderStickOnly(colCX) {
@@ -2245,6 +2263,19 @@ body {
     }
     // timePressureは全員に適用（グローバルスコープで参照）
     u.stability -= (DRAIN_BASE * drainMult * timePressure + gust) * dt;
+    // オンラインモード中のCPUは周期的にプレイヤーを攻撃
+    if (_onlineMode && !u.isOnline) {
+      if (!u._nextAttack) u._nextAttack = elapsed + 5 + Math.random() * 8;
+      if (elapsed >= u._nextAttack && gameState === 'burning') {
+        var _dmg = 8 + Math.round(Math.random() * 7);
+        if (_tapMode === 'defense') _dmg = Math.ceil(_dmg * 0.4);
+        stability = Math.max(0, stability - _dmg);
+        _elimFlash = 0.45;
+        _restorePopups.push({ x: gc.width * 0.5, y: (_burnY || gc.height*0.5) - 30,
+          t: 0.6, val: '-' + _dmg, color: '#ff4455' });
+        u._nextAttack = elapsed + 7 + Math.random() * 10;
+      }
+    }
     if (u.stability <= 0) {
       u.stability = 0;
       if (!u.eliminated) { _pendingRecalc = true; _elimFlash = 0.7; } // 脱落演出トリガー
@@ -2294,6 +2325,16 @@ body {
     gctx.lineCap = 'butt';
 
     renderHand(topX, topY);
+    _renderVerticalName(u.name, topX, topY + 20, charY - 6);
+    // 攻撃/防御アイコン（オンラインプレイヤーのモード表示）
+    if (u.isOnline && u.mode && u.mode !== 'unguarded') {
+      gctx.save();
+      gctx.font = '11px sans-serif';
+      gctx.textAlign = 'center';
+      gctx.textBaseline = 'bottom';
+      gctx.fillText(u.mode === 'attack' ? '⚔️' : '🛡️', topX, topY - 2);
+      gctx.restore();
+    }
 
     // Smoke puff (same array as human — rendered by renderSmokes)
     if (frameN % 5 === 0) {
@@ -3469,10 +3510,10 @@ body {
     } catch(e) {}
   }
 
-  // ── TAP MODE (攻撃 / 協力 / 通常) ──────────────
-  function _cycleTapMode(dir) {
-    var idx = _TAP_MODES.indexOf(_tapMode);
-    _tapMode = _TAP_MODES[(idx + dir + _TAP_MODES.length) % _TAP_MODES.length];
+  // ── TAP MODE (攻撃 / 防御 / 無防備) ──────────────
+  function _verticalSwipe(dir) {
+    if (dir === 'up')   _tapMode = (_tapMode === 'attack')  ? 'unguarded' : 'attack';
+    if (dir === 'down') _tapMode = (_tapMode === 'defense') ? 'unguarded' : 'defense';
     _updateModeUI();
   }
 
@@ -3487,7 +3528,7 @@ body {
 
   function _modeRingColor(alpha) {
     if (_tapMode === 'attack')    return 'rgba(255,60,70,'  + alpha + ')';
-    if (_tapMode === 'cooperate') return 'rgba(60,160,255,' + alpha + ')';
+    if (_tapMode === 'defense')   return 'rgba(60,160,255,' + alpha + ')';
     return null; // use default gold
   }
 
@@ -3613,9 +3654,8 @@ body {
     });
     if (others.length === 0) return;
     var target = others[Math.floor(Math.random() * others.length)];
-    var power  = _tapMode === 'attack' ? -12 : 10;
     _onlineRef.child('events').push({
-      to: target, type: _tapMode, power: power, t: Date.now()
+      to: target, type: 'attack', power: -12, t: Date.now()
     });
   }
 
@@ -3626,13 +3666,13 @@ body {
       if (!ev || ev.to !== _onlinePid) return;
       if (Date.now() - ev.t > 6000) return; // 6秒以上前は無視
       if (gameState !== 'burning') return;
-      stability = Math.max(0, Math.min(STABILITY_MAX, stability + (ev.power || 0)));
-      // 視覚フィードバック
-      _elimFlash = ev.power < 0 ? 0.5 : 0;
-      if (ev.power > 0) {
-        _restorePopups.push({ x: gc.width * 0.5, y: _burnY - 30,
-          t: 0.75, val: '+' + ev.power, color: '#44aaff' });
-      }
+      var dmg = ev.power || 0;
+      if (dmg < 0 && _tapMode === 'defense') dmg = Math.ceil(dmg * 0.4);
+      stability = Math.max(0, Math.min(STABILITY_MAX, stability + dmg));
+      _elimFlash = dmg < 0 ? 0.5 : 0;
+      _restorePopups.push({ x: gc.width * 0.5, y: _burnY - 30,
+        t: 0.75, val: (dmg >= 0 ? '+' : '') + dmg,
+        color: dmg < 0 ? '#ff4455' : '#44aaff' });
     });
   }
 
@@ -3662,6 +3702,7 @@ body {
       _ou.phase     = _op.phase  || 0;
       _ou.elapsed   = _op.burnTime || 0;
       _ou.burnTime  = _op.burnTime || 0;
+      _ou.mode      = _op.mode || 'unguarded';
       _ou.eliminated = !_op.alive || !!_op.done;
       if (!_wasElim && _ou.eliminated) _ou.eliminatedPhase = _ou.phase;
     }
@@ -3704,7 +3745,8 @@ body {
     _onlineRef.child('players/' + _onlinePid).update({
       alive: true, phase: phaseIdx,
       stability: Math.round(stability),
-      burnTime: parseFloat(elapsed.toFixed(1))
+      burnTime: parseFloat(elapsed.toFixed(1)),
+      mode: _tapMode
     });
   }
 
