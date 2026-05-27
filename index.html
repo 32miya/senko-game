@@ -530,6 +530,8 @@ body {
   var _lastManShrink   = 1.0;  // visual shrink factor 1.0→0.1
   var _tapBlockedFlash = 0;    // 1→0, decays when tap is rejected by cooldown
   var _restorePopups   = [];   // floating +N texts above ember after each tap
+  var _atkProjs        = [];   // attack projectiles flying to targets
+  var _gdt             = 0;    // last frame dt (module-level for renderGame access)
   var _chargeTime      = 0;    // seconds without tap beyond cooldown
   var _chargeMult      = 1.0;  // restore multiplier from charge buildup (1.0→2.0)
   var liveMode         = false; // true = simultaneous all-human multiplayer
@@ -871,6 +873,7 @@ body {
     _lastManShrink   = 1.0;
     _tapBlockedFlash = 0;
     _restorePopups   = [];
+    _atkProjs        = [];
     _chargeTime      = 0;
     _chargeMult      = 1.0;
     gameState      = "burning";
@@ -914,6 +917,7 @@ body {
     if (gameState !== "burning") return;
 
     var dt      = Math.min((ts - lastTS) / 1000, 0.05);
+    _gdt        = dt;
     lastTS      = ts;
     var elapsed = (ts - startTime) / 1000;
     frameN++;
@@ -1699,9 +1703,12 @@ body {
     var charY  = wy - 28;
 
     gctx.lineCap = 'round';
+    var _si = 1 - stability / STABILITY_MAX;
+    var _r0 = Math.round(215 + 35 * _si), _g0 = Math.round(172 - 80 * _si), _b0 = Math.round(88 - 55 * _si);
+    var _r1 = Math.round(138 + 90 * _si), _g1 = Math.round(90  - 60 * _si), _b1 = Math.round(34 - 20 * _si);
     var stG = gctx.createLinearGradient(topX, topY, wx, charY);
-    stG.addColorStop(0, 'rgba(215,172,88,0.52)');
-    stG.addColorStop(1, 'rgba(138,90,34,0.78)');
+    stG.addColorStop(0, 'rgba('+_r0+','+_g0+','+_b0+',0.52)');
+    stG.addColorStop(1, 'rgba('+_r1+','+_g1+','+_b1+',0.78)');
     gctx.strokeStyle = stG; gctx.lineWidth = 2.2;
     gctx.beginPath(); gctx.moveTo(topX, topY); gctx.lineTo(wx, charY); gctx.stroke();
 
@@ -2031,6 +2038,51 @@ body {
   }
 
   // ── RENDER ─────────────────────────────────────
+  function _renderAtkProjs() {
+    var dt = _gdt || 0.016;
+    for (var _ai = _atkProjs.length - 1; _ai >= 0; _ai--) {
+      var _ap = _atkProjs[_ai];
+      _ap.t -= dt;
+      var _prog = 1 - Math.max(0, _ap.t) / _ap.maxT;
+      var _px = _ap.ox + (_ap.tx - _ap.ox) * _prog;
+      var _py = _ap.oy + (_ap.ty - _ap.oy) * _prog - Math.sin(_prog * Math.PI) * 44;
+      _ap.trail.push({ x: _px, y: _py });
+      if (_ap.trail.length > 14) _ap.trail.shift();
+      // trail
+      for (var _ti = 0; _ti < _ap.trail.length; _ti++) {
+        var _ta = (_ti / _ap.trail.length) * 0.75;
+        var _tr = 1 + (_ti / _ap.trail.length) * 3;
+        gctx.save();
+        gctx.globalAlpha = _ta;
+        gctx.fillStyle = _ti > _ap.trail.length * 0.6 ? '#ff9020' : '#ffdd60';
+        gctx.beginPath(); gctx.arc(_ap.trail[_ti].x, _ap.trail[_ti].y, _tr, 0, Math.PI*2); gctx.fill();
+        gctx.restore();
+      }
+      // head glow
+      var _ha = Math.min(1, _ap.t / _ap.maxT * 4 + 0.2);
+      gctx.save();
+      gctx.globalAlpha = _ha;
+      var _pg = gctx.createRadialGradient(_px, _py, 0, _px, _py, 7);
+      _pg.addColorStop(0, 'rgba(255,230,100,1)');
+      _pg.addColorStop(0.5, 'rgba(255,80,10,0.85)');
+      _pg.addColorStop(1, 'rgba(255,20,0,0)');
+      gctx.fillStyle = _pg;
+      gctx.beginPath(); gctx.arc(_px, _py, 7, 0, Math.PI*2); gctx.fill();
+      gctx.restore();
+      // arrival burst
+      if (_ap.t <= 0) {
+        for (var _bi = 0; _bi < 10; _bi++) {
+          var _ba = Math.random() * Math.PI * 2;
+          var _bs = 0.7 + Math.random() * 1.8;
+          particles.push({ x:_ap.tx, y:_ap.ty, vx:Math.cos(_ba)*_bs, vy:Math.sin(_ba)*_bs,
+            life:0.5+Math.random()*0.3, maxLife:0.8, sz:1.5+Math.random()*2,
+            hue:30+Math.random()*20, grav:0.04, trail:[], trailMax:0, canBranch:false, branched:false });
+        }
+        _atkProjs.splice(_ai, 1);
+      }
+    }
+  }
+
   function renderGame(elapsed) {
     var W  = gc.width, H = gc.height;
     var cx = humanDrawX(), cy = _burnY || H * 0.50;
@@ -2049,6 +2101,7 @@ body {
 
     renderSmokes();
     drawParticles();
+    _renderAtkProjs();
 
     // _wx, _wy already computed in gameLoop before spawning — use them directly
     // _tapBlockedFlash adds a brief jitter to signal a rejected tap
@@ -2292,7 +2345,7 @@ body {
     var cy   = getBurnY(elapsed, u.burnYOffset);
     var instab = 1 - u.stability / STABILITY_MAX;
     var wx = cx + Math.sin(u.emberWobble * 1.3) * 3 * instab;
-    var wy = cy + Math.cos(u.emberWobble)       * 3 * instab;
+    var wy = cy + Math.cos(u.emberWobble) * 3 * instab - instab * 22; // 低体力ほど火が上へ
     var topX = cx + Math.sin(u.emberWobble * 0.12) * 1.2;
     var hue  = u.hue || 45;
 
@@ -2307,12 +2360,14 @@ body {
       return;
     }
 
-    // Bamboo stick
+    // Bamboo stick（体力低下でオレンジ→赤色に変化）
     gctx.lineCap = 'round';
     var charY = wy - 28;
+    var _r0 = Math.round(215 + 35 * instab), _g0 = Math.round(172 - 80 * instab), _b0 = Math.round(88 - 55 * instab);
+    var _r1 = Math.round(138 + 90 * instab), _g1 = Math.round(90  - 60 * instab), _b1 = Math.round(34 - 20 * instab);
     var stG = gctx.createLinearGradient(topX, topY, wx, charY);
-    stG.addColorStop(0, 'rgba(215,172,88,0.52)');
-    stG.addColorStop(1, 'rgba(138,90,34,0.78)');
+    stG.addColorStop(0, 'rgba('+_r0+','+_g0+','+_b0+',0.62)');
+    stG.addColorStop(1, 'rgba('+_r1+','+_g1+','+_b1+',0.85)');
     gctx.strokeStyle = stG; gctx.lineWidth = 2.2;
     gctx.beginPath(); gctx.moveTo(topX, topY); gctx.lineTo(wx, charY); gctx.stroke();
 
@@ -3646,7 +3701,7 @@ body {
     showScreen('scTitle');
   };
 
-  // 攻撃/協力タップをランダムな1人に送信
+  // 攻撃タップをランダムな1人に送信 + プロジェクタイル発射
   function _sendOnlineTapEffect() {
     if (!_onlineRef) return;
     var others = Object.keys(_onlinePlayers).filter(function(pid) {
@@ -3657,6 +3712,18 @@ body {
     _onlineRef.child('events').push({
       to: target, type: 'attack', power: -12, t: Date.now()
     });
+    // 攻撃プロジェクタイルを対象スパークラーへ発射
+    var _sx = _wx || humanDrawX(), _sy = _wy || gc.height * 0.5;
+    var _tx = gc.width * 0.5, _ty = gc.height * 0.5;
+    for (var _tpi = 0; _tpi < cpuUnits.length; _tpi++) {
+      if (cpuUnits[_tpi].onlinePid === target) {
+        _tx = cpuDrawX(_tpi);
+        _ty = getBurnY(cpuUnits[_tpi].elapsed || 0, cpuUnits[_tpi].burnYOffset);
+        break;
+      }
+    }
+    var dur = 0.4 + Math.abs(_tx - _sx) / (gc.width + 1) * 0.35;
+    _atkProjs.push({ ox: _sx, oy: _sy, tx: _tx, ty: _ty, t: dur, maxT: dur, trail: [] });
   }
 
   // 自分宛てのイベントを受信して安定度に反映
