@@ -262,6 +262,15 @@ body {
   .s-val        { font-size:22px; }
   .comment-box  { font-size:12px; }
 }
+#modeIndicator {
+  position:absolute; bottom:calc(88px + env(safe-area-inset-bottom,0px));
+  left:50%; transform:translateX(-50%);
+  display:none; flex-direction:column; align-items:center; gap:2px;
+  pointer-events:none; z-index:10;
+}
+.mode-icon  { font-size:20px; line-height:1; }
+.mode-hint  { font-size:8px; letter-spacing:3px; color:rgba(232,220,200,0.45); }
+.mode-label { font-size:10px; letter-spacing:4px; }
 #scOnline, #scOnlineLobby {
   justify-content:center;
   background:radial-gradient(ellipse at 50% 30%,#0a1a2e 0%,#04020a 65%);
@@ -370,6 +379,11 @@ body {
   <div class="meter-wrap">
     <div class="meter-label">安 定 度</div>
     <div class="meter-bg"><div class="meter-bar" id="meterBar" style="width:100%;background:#b8d860;"></div></div>
+  </div>
+  <div id="modeIndicator">
+    <div class="mode-icon" id="modeIcon">🎇</div>
+    <div class="mode-label" id="modeLabel" style="color:#d4a853">通 常</div>
+    <div class="mode-hint">← ス ワ イ プ →</div>
   </div>
 </div>
 
@@ -560,7 +574,16 @@ body {
   var mpRoundResults = [];
 
   // Named touch handler (avoids anonymous-function leak across rounds)
-  var _onTouch = null;
+  var _onTouch    = null;
+  var _onTouchEnd = null;
+  var _touchStartX = 0, _touchStartY = 0, _touchStartT = 0;
+  var _tapMode = 'normal'; // 'normal' | 'attack' | 'cooperate'
+  var _TAP_MODES = ['normal','attack','cooperate'];
+  var _MODE_CFG  = {
+    normal:    { icon:'🎇', label:'通　常', color:'#d4a853' },
+    attack:    { icon:'⚔️',  label:'攻　撃', color:'#ff4455' },
+    cooperate: { icon:'🤝', label:'協　力', color:'#44aaff' }
+  };
 
   // CPU opponent system
   var CPU_NAMES  = ["玄蔵","弥七","おみつ","鉄五郎","お縫","次郎吉","おたき"];
@@ -788,8 +811,25 @@ body {
     fitCanvas();
     window.addEventListener("resize", fitCanvas);
     gc.addEventListener("click", onTap);
-    _onTouch = function(e){ e.preventDefault(); onTap(); };
+    _onTouch = function(e) {
+      e.preventDefault();
+      _touchStartX = e.touches[0].clientX;
+      _touchStartY = e.touches[0].clientY;
+      _touchStartT = Date.now();
+    };
+    _onTouchEnd = function(e) {
+      e.preventDefault();
+      var dx   = e.changedTouches[0].clientX - _touchStartX;
+      var dy   = e.changedTouches[0].clientY - _touchStartY;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist > 45 && Math.abs(dx) > Math.abs(dy)) {
+        _cycleTapMode(dx > 0 ? 1 : -1);
+      } else if (dist < 22 && Date.now() - _touchStartT < 400) {
+        onTap();
+      }
+    };
     gc.addEventListener("touchstart", _onTouch, { passive:false });
+    gc.addEventListener("touchend",   _onTouchEnd, { passive:false });
 
     stability   = STABILITY_MAX;
     maxStab     = STABILITY_MAX;
@@ -839,6 +879,9 @@ body {
     lastTS      = startTime;
     initBG();
     initAudio();
+
+    _tapMode = 'normal';
+    _updateModeUI();
 
     var hint = document.getElementById("tapHint");
     hint.style.opacity = "1";
@@ -1087,6 +1130,8 @@ body {
 
     lastTap = now;
     tapCount++;
+    // オンラインモードで攻撃/協力タップ → Firebase にイベント送信
+    if (_onlineMode && _tapMode !== 'normal') _sendOnlineTapEffect();
     var prevCombo = combo;
 
     if (phaseIdx === 1 && peonyChance !== null &&
@@ -1738,35 +1783,38 @@ body {
 
     // ── Sweet-spot zone: filled donut between RING_MIN and RING_PERF ──
     var zoneAlpha = inPerf ? 0.22 : (nearGood ? 0.10 : 0.04);
-    gctx.fillStyle = 'rgba(255,228,60,' + zoneAlpha + ')';
+    var _mzc = _modeRingColor(zoneAlpha);
+    gctx.fillStyle = _mzc || ('rgba(255,228,60,' + zoneAlpha + ')');
     gctx.beginPath();
     gctx.arc(wx, wy, RING_PERF, 0, Math.PI * 2, false); // outer edge CW
     gctx.arc(wx, wy, RING_MIN,  0, Math.PI * 2, true);  // inner cutout CCW
     gctx.fill();
 
     // ── PERF boundary marker: dashed when far, solid gold when ring enters zone ──
+    var _mc = _modeRingColor(1);
     gctx.globalAlpha = inPerf ? 0.80 : (nearGood ? 0.42 : 0.16);
-    gctx.strokeStyle = '#ffe840';
+    gctx.strokeStyle = _mc || '#ffe840';
     gctx.lineWidth   = inPerf ? 1.8 : 1.0;
     if (!nearGood) gctx.setLineDash([3, 6]);
     gctx.beginPath(); gctx.arc(wx, wy, RING_PERF, 0, Math.PI * 2); gctx.stroke();
     gctx.setLineDash([]);
     gctx.globalAlpha = 1;
 
-    gctx.strokeStyle = 'rgba(200,160,60,0.12)';
+    gctx.strokeStyle = _mc ? _mc.replace(',1)', ',0.12)') : 'rgba(200,160,60,0.12)';
     gctx.lineWidth   = 1.0;
     gctx.beginPath(); gctx.arc(wx, wy, RING_GOOD, 0, Math.PI*2); gctx.stroke();
 
     var alpha, width, color;
     if (r <= RING_PERF) {
-      alpha = 0.92; width = 3.0; color = 'rgba(255,238,80,' + alpha + ')';
+      alpha = 0.92; width = 3.0;
+      color = _mc ? _mc.replace(',1)', ',' + alpha + ')') : 'rgba(255,238,80,' + alpha + ')';
     } else if (r <= RING_GOOD) {
       var t2 = (r - RING_PERF) / (RING_GOOD - RING_PERF);
       alpha  = 0.55 + (1-t2)*0.35; width = 1.8 + (1-t2)*1.0;
-      color  = 'rgba(230,185,55,' + alpha + ')';
+      color  = _mc ? _mc.replace(',1)', ',' + alpha + ')') : 'rgba(230,185,55,' + alpha + ')';
     } else {
       alpha = 0.10 + prox * 0.28; width = 1.2;
-      color = 'rgba(180,140,50,' + alpha + ')';
+      color = _mc ? _mc.replace(',1)', ',' + alpha + ')') : 'rgba(180,140,50,' + alpha + ')';
     }
     gctx.strokeStyle = color; gctx.lineWidth = width;
     gctx.beginPath(); gctx.arc(wx, wy, r, 0, Math.PI*2); gctx.stroke();
@@ -1895,7 +1943,9 @@ body {
     cancelAnimationFrame(animId);
     window.removeEventListener("resize", fitCanvas);
     gc.removeEventListener("click", onTap);
-    if (_onTouch) { gc.removeEventListener("touchstart", _onTouch); _onTouch = null; }
+    if (_onTouch)    { gc.removeEventListener("touchstart", _onTouch);   _onTouch = null; }
+    if (_onTouchEnd) { gc.removeEventListener("touchend",   _onTouchEnd); _onTouchEnd = null; }
+    document.getElementById('modeIndicator').style.display = 'none';
     playFallSound();
     requestAnimationFrame(fallLoop);
   }
@@ -2326,11 +2376,15 @@ body {
     gctx.fillStyle   = '#f0c870';
     gctx.beginPath(); gctx.arc(hcx, dotY, dotR, 0, Math.PI * 2); gctx.fill();
 
-    // CPU dots
+    // CPU / オンラインプレイヤー dots + 名前
+    var nameY  = dotY + dotR + 10;
+    var nameFZ = Math.max(7, Math.min(10, W / mpTotalPlayers * 0.18));
+    gctx.font      = '300 ' + nameFZ + 'px "Noto Serif JP",serif';
+    gctx.textAlign = 'center';
     for (var j = 0; j < cpuUnits.length; j++) {
       var u   = cpuUnits[j];
       var dcx = cpuDrawX(j);
-      var ch  = CPU_HUES[j % CPU_HUES.length];
+      var ch  = u.isOnline ? (ONLINE_HUES[j % ONLINE_HUES.length]) : (CPU_HUES[j % CPU_HUES.length]);
       if (!u.eliminated) {
         var cGlow = gctx.createRadialGradient(dcx, dotY, 0, dcx, dotY, dotR * 4);
         cGlow.addColorStop(0, 'hsla(' + ch + ',100%,70%,0.40)');
@@ -2342,8 +2396,22 @@ body {
       gctx.globalAlpha = u.eliminated ? 0.12 : 0.75;
       gctx.fillStyle   = 'hsl(' + ch + ',100%,72%)';
       gctx.beginPath(); gctx.arc(dcx, dotY, dotR, 0, Math.PI * 2); gctx.fill();
+      // 名前（オンラインプレイヤーは強調表示）
+      if (u.isOnline && !u.eliminated) {
+        gctx.globalAlpha = 0.90;
+        gctx.fillStyle   = 'hsl(' + ch + ',100%,82%)';
+        var shortName = u.name.slice(0, 4);
+        gctx.fillText(shortName, dcx, nameY);
+      }
+    }
+    // 自分の名前
+    if (hAlive) {
+      gctx.globalAlpha = 0.75;
+      gctx.fillStyle   = '#f0c870';
+      gctx.fillText((mpPlayerNames[0] || 'あなた').slice(0, 4), hcx, nameY);
     }
     gctx.globalAlpha = 1;
+    gctx.textAlign   = 'left';
   }
 
   // ── MULTIPLAYER END / WATCH ──────────────────────
@@ -3401,6 +3469,28 @@ body {
     } catch(e) {}
   }
 
+  // ── TAP MODE (攻撃 / 協力 / 通常) ──────────────
+  function _cycleTapMode(dir) {
+    var idx = _TAP_MODES.indexOf(_tapMode);
+    _tapMode = _TAP_MODES[(idx + dir + _TAP_MODES.length) % _TAP_MODES.length];
+    _updateModeUI();
+  }
+
+  function _updateModeUI() {
+    var cfg  = _MODE_CFG[_tapMode];
+    var el   = document.getElementById('modeIndicator');
+    el.style.display = _onlineMode ? 'flex' : 'none';
+    document.getElementById('modeIcon').textContent  = cfg.icon;
+    document.getElementById('modeLabel').textContent = cfg.label;
+    document.getElementById('modeLabel').style.color = cfg.color;
+  }
+
+  function _modeRingColor(alpha) {
+    if (_tapMode === 'attack')    return 'rgba(255,60,70,'  + alpha + ')';
+    if (_tapMode === 'cooperate') return 'rgba(60,160,255,' + alpha + ')';
+    return null; // use default gold
+  }
+
   // ── ONLINE MODE ────────────────────────────────
   var _onlineMode    = false;
   var _onlinePid     = null;
@@ -3515,6 +3605,37 @@ body {
     showScreen('scTitle');
   };
 
+  // 攻撃/協力タップをランダムな1人に送信
+  function _sendOnlineTapEffect() {
+    if (!_onlineRef) return;
+    var others = Object.keys(_onlinePlayers).filter(function(pid) {
+      return pid !== _onlinePid && !_onlinePlayers[pid].done;
+    });
+    if (others.length === 0) return;
+    var target = others[Math.floor(Math.random() * others.length)];
+    var power  = _tapMode === 'attack' ? -12 : 10;
+    _onlineRef.child('events').push({
+      to: target, type: _tapMode, power: power, t: Date.now()
+    });
+  }
+
+  // 自分宛てのイベントを受信して安定度に反映
+  function _startOnlineEventListener() {
+    _onlineRef.child('events').on('child_added', function(snap) {
+      var ev = snap.val();
+      if (!ev || ev.to !== _onlinePid) return;
+      if (Date.now() - ev.t > 6000) return; // 6秒以上前は無視
+      if (gameState !== 'burning') return;
+      stability = Math.max(0, Math.min(STABILITY_MAX, stability + (ev.power || 0)));
+      // 視覚フィードバック
+      _elimFlash = ev.power < 0 ? 0.5 : 0;
+      if (ev.power > 0) {
+        _restorePopups.push({ x: gc.width * 0.5, y: _burnY - 30,
+          t: 0.75, val: '+' + ev.power, color: '#44aaff' });
+      }
+    });
+  }
+
   // オンラインプレイヤー用のCPU互換ユニットを生成
   function _createOnlineUnit(pid, name, hue) {
     return {
@@ -3575,6 +3696,7 @@ body {
     _onlineRef.child('status').on('value', function(snap) {
       if (snap.val() === 'done') _showOnlineRanking();
     });
+    _startOnlineEventListener();
   }
 
   function _onlineSyncState(elapsed) {
