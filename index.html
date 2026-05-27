@@ -265,12 +265,19 @@ body {
 #modeIndicator {
   position:absolute; bottom:calc(88px + env(safe-area-inset-bottom,0px));
   left:50%; transform:translateX(-50%);
-  display:none; flex-direction:column; align-items:center; gap:2px;
+  display:none; flex-direction:column; align-items:center; gap:3px;
   pointer-events:none; z-index:10;
+  background:rgba(8,5,18,0.70); border:1px solid rgba(212,168,83,0.22);
+  border-radius:10px; padding:8px 20px; min-width:130px;
 }
-.mode-icon  { font-size:20px; line-height:1; }
-.mode-hint  { font-size:8px; letter-spacing:3px; color:rgba(232,220,200,0.45); }
-.mode-label { font-size:10px; letter-spacing:4px; }
+.mode-swipe-v { font-size:8px; letter-spacing:2px; color:rgba(232,220,200,0.38); }
+.mode-row     { display:flex; align-items:center; gap:8px; }
+.mode-icon    { font-size:18px; line-height:1; }
+.mode-label   { font-size:10px; letter-spacing:4px; }
+.target-panel { display:flex; flex-direction:column; align-items:center; gap:1px;
+  border-top:1px solid rgba(212,168,83,0.15); padding-top:5px; width:100%; margin-top:2px; }
+.target-hint  { font-size:7px; letter-spacing:2px; color:rgba(232,220,200,0.35); }
+.target-name  { font-size:11px; letter-spacing:3px; color:rgba(240,210,150,0.88); }
 #scOnline, #scOnlineLobby {
   justify-content:center;
   background:radial-gradient(ellipse at 50% 30%,#0a1a2e 0%,#04020a 65%);
@@ -381,9 +388,16 @@ body {
     <div class="meter-bg"><div class="meter-bar" id="meterBar" style="width:100%;background:#b8d860;"></div></div>
   </div>
   <div id="modeIndicator">
-    <div class="mode-icon" id="modeIcon">🎇</div>
-    <div class="mode-label" id="modeLabel" style="color:#d4a853">通 常</div>
-    <div class="mode-hint">← ス ワ イ プ →</div>
+    <div class="mode-swipe-v">↑ 攻　撃</div>
+    <div class="mode-row">
+      <div class="mode-icon" id="modeIcon">🎇</div>
+      <div class="mode-label" id="modeLabel" style="color:#d4a853">無 防 備</div>
+    </div>
+    <div class="mode-swipe-v">↓ 防　御</div>
+    <div class="target-panel" id="targetPanel">
+      <div class="target-hint">← 標 的 を 選 ぶ →</div>
+      <div class="target-name" id="targetName">—</div>
+    </div>
   </div>
 </div>
 
@@ -532,6 +546,7 @@ body {
   var _restorePopups   = [];   // floating +N texts above ember after each tap
   var _atkProjs        = [];   // attack projectiles flying to targets
   var _gdt             = 0;    // last frame dt (module-level for renderGame access)
+  var _targetCpuIdx    = -1;   // index into cpuUnits for attack target (-1=auto)
   var _chargeTime      = 0;    // seconds without tap beyond cooldown
   var _chargeMult      = 1.0;  // restore multiplier from charge buildup (1.0→2.0)
   var liveMode         = false; // true = simultaneous all-human multiplayer
@@ -825,6 +840,8 @@ body {
       var dist = Math.sqrt(dx * dx + dy * dy);
       if (dist > 45 && Math.abs(dy) > Math.abs(dx)) {
         _verticalSwipe(dy < 0 ? 'up' : 'down');
+      } else if (dist > 45 && Math.abs(dx) > Math.abs(dy)) {
+        _horizontalSwipe(dx > 0 ? 'right' : 'left');
       } else if (dist < 22 && Date.now() - _touchStartT < 400) {
         onTap();
       }
@@ -874,6 +891,7 @@ body {
     _tapBlockedFlash = 0;
     _restorePopups   = [];
     _atkProjs        = [];
+    _targetCpuIdx    = -1;
     _chargeTime      = 0;
     _chargeMult      = 1.0;
     gameState      = "burning";
@@ -3572,13 +3590,40 @@ body {
     _updateModeUI();
   }
 
+  function _horizontalSwipe(dir) {
+    var _tlist = [];
+    for (var _hi = 0; _hi < cpuUnits.length; _hi++) {
+      if (cpuUnits[_hi].isOnline && !cpuUnits[_hi].eliminated) _tlist.push(_hi);
+    }
+    if (_tlist.length === 0) return;
+    var _cur = _tlist.indexOf(_targetCpuIdx);
+    if (_cur < 0) _cur = 0;
+    else if (dir === 'right') _cur = (_cur + 1) % _tlist.length;
+    else                       _cur = (_cur - 1 + _tlist.length) % _tlist.length;
+    _targetCpuIdx = _tlist[_cur];
+    _updateModeUI();
+  }
+
   function _updateModeUI() {
-    var cfg  = _MODE_CFG[_tapMode];
-    var el   = document.getElementById('modeIndicator');
+    var cfg = _MODE_CFG[_tapMode];
+    var el  = document.getElementById('modeIndicator');
     el.style.display = _onlineMode ? 'flex' : 'none';
     document.getElementById('modeIcon').textContent  = cfg.icon;
     document.getElementById('modeLabel').textContent = cfg.label;
     document.getElementById('modeLabel').style.color = cfg.color;
+    // 標的名を更新
+    var tnEl = document.getElementById('targetName');
+    if (!tnEl) return;
+    var _tu = (_targetCpuIdx >= 0 && cpuUnits[_targetCpuIdx] && !cpuUnits[_targetCpuIdx].eliminated)
+      ? cpuUnits[_targetCpuIdx] : null;
+    if (!_tu) {
+      for (var _tui = 0; _tui < cpuUnits.length; _tui++) {
+        if (cpuUnits[_tui].isOnline && !cpuUnits[_tui].eliminated) {
+          _tu = cpuUnits[_tui]; _targetCpuIdx = _tui; break;
+        }
+      }
+    }
+    tnEl.textContent = _tu ? _tu.name : '—';
   }
 
   function _modeRingColor(alpha) {
@@ -3701,27 +3746,29 @@ body {
     showScreen('scTitle');
   };
 
-  // 攻撃タップをランダムな1人に送信 + プロジェクタイル発射
+  // 攻撃タップを標的に送信 + プロジェクタイル発射
   function _sendOnlineTapEffect() {
     if (!_onlineRef) return;
-    var others = Object.keys(_onlinePlayers).filter(function(pid) {
-      return pid !== _onlinePid && !_onlinePlayers[pid].done;
-    });
-    if (others.length === 0) return;
-    var target = others[Math.floor(Math.random() * others.length)];
-    _onlineRef.child('events').push({
-      to: target, type: 'attack', power: -12, t: Date.now()
-    });
-    // 攻撃プロジェクタイルを対象スパークラーへ発射
-    var _sx = _wx || humanDrawX(), _sy = _wy || gc.height * 0.5;
-    var _tx = gc.width * 0.5, _ty = gc.height * 0.5;
-    for (var _tpi = 0; _tpi < cpuUnits.length; _tpi++) {
-      if (cpuUnits[_tpi].onlinePid === target) {
-        _tx = cpuDrawX(_tpi);
-        _ty = getBurnY(cpuUnits[_tpi].elapsed || 0, cpuUnits[_tpi].burnYOffset);
-        break;
+    // 選択標的を確認、脱落済みなら生存プレイヤーへ自動切替
+    var _tu = (_targetCpuIdx >= 0 && cpuUnits[_targetCpuIdx] &&
+               cpuUnits[_targetCpuIdx].isOnline && !cpuUnits[_targetCpuIdx].eliminated)
+      ? cpuUnits[_targetCpuIdx] : null;
+    if (!_tu) {
+      for (var _fi = 0; _fi < cpuUnits.length; _fi++) {
+        if (cpuUnits[_fi].isOnline && !cpuUnits[_fi].eliminated) {
+          _tu = cpuUnits[_fi]; _targetCpuIdx = _fi; break;
+        }
       }
+      _updateModeUI();
     }
+    if (!_tu) return;
+    _onlineRef.child('events').push({
+      to: _tu.onlinePid, type: 'attack', power: -12, t: Date.now()
+    });
+    // プロジェクタイル発射
+    var _sx = _wx || humanDrawX(), _sy = _wy || gc.height * 0.5;
+    var _tx = cpuDrawX(_targetCpuIdx);
+    var _ty = getBurnY(_tu.elapsed || 0, _tu.burnYOffset);
     var dur = 0.4 + Math.abs(_tx - _sx) / (gc.width + 1) * 0.35;
     _atkProjs.push({ ox: _sx, oy: _sy, tx: _tx, ty: _ty, t: dur, maxT: dur, trail: [] });
   }
